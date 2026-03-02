@@ -1,0 +1,58 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Playfair+Display:ital,wght@0,400;0,700;1,400&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Playfair Display", serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+@layer base {
+  body {
+    @apply bg-[#FDFDFD] text-slate-900 font-sans antialiased;
+  }
+  
+  h1, h2, h3 {
+    @apply font-serif tracking-tight;
+  }
+}
+
+.glass-panel {
+  @apply bg-white/80 backdrop-blur-md border border-white/20 shadow-xl;
+}
+
+.premium-card {
+  @apply bg-white border border-slate-100 shadow-[0_2px_15px_-3px_rgba(0,0,0,0.07),0_10px_20px_-2px_rgba(0,0,0,0.04)] rounded-2xl transition-all duration-300 hover:shadow-[0_20px_25px_-5px_rgba(0,0,0,0.1),0_10px_10px_-5px_rgba(0,0,0,0.04)] hover:-translate-y-1;
+}
+
+.btn-primary {
+  @apply bg-slate-900 text-white px-6 py-2.5 rounded-full font-medium transition-all hover:bg-slate-800 active:scale-95 shadow-lg shadow-slate-200;
+}
+
+.btn-secondary {
+  @apply bg-white text-slate-900 border border-slate-200 px-6 py-2.5 rounded-full font-medium transition-all hover:bg-slate-50 active:scale-95;
+}
+
+.pdf-canvas-container {
+  @apply relative bg-[#E5E7EB] p-12 min-h-screen flex flex-col items-center gap-12;
+}
+
+.pdf-page-shadow {
+  @apply shadow-[0_35px_60px_-15px_rgba(0,0,0,0.3)] bg-white;
+}
+
+.field-badge {
+  @apply absolute -top-7 left-0 bg-slate-900 text-white px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-widest shadow-lg;
+}
+
+.field-box {
+  @apply absolute border-2 border-slate-900 bg-white/40 backdrop-blur-[2px] cursor-move flex items-center justify-center transition-all hover:bg-white/60;
+}
+
+.field-box.active {
+  @apply ring-4 ring-slate-900/10 border-slate-900 bg-white/80;
+}
+
+.signature-stroke {
+  @apply border-2 border-slate-200 rounded-xl bg-white w-full h-56 cursor-crosshair overflow-hidden;
+}
