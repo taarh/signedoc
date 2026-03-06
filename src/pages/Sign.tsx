@@ -188,7 +188,7 @@ export function Sign() {
           <div className="max-w-4xl w-full bg-white shadow-[0_50px_100px_-20px_rgba(0,0,0,0.15)] relative mb-10 lg:mb-20">
             <Worker workerUrl="https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js">
               <Viewer 
-                fileUrl={`/${data.doc.file_path}`}
+                fileUrl={`/api/documents/${data.doc.id}/file`}
                 plugins={[defaultLayoutPluginInstance]}
               />
             </Worker>

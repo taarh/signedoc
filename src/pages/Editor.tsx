@@ -357,7 +357,7 @@ export function Editor() {
             <div className="pdf-page-shadow">
               <Worker workerUrl="https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js">
                 <Viewer 
-                  fileUrl={`/${document.file_path}`}
+                  fileUrl={`/api/documents/${document.id}/file`}
                   plugins={[defaultLayoutPluginInstance]}
                 />
               </Worker>

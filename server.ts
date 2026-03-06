@@ -15,7 +15,14 @@ import { sendSigningLink, sendSignedPdfLink } from "./lib/sendMail";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const MONGO_URI = process.env.MONGO_URI || "mongodb://localhost:27017/signflow";
+// If MONGO_PASSWORD is set, inject it (URL-encoded) into MONGO_URI to support special characters
+function getMongoUri(): string {
+  const base = process.env.MONGO_URI || "mongodb://localhost:27017/signflow";
+  const password = process.env.MONGO_PASSWORD;
+  if (!password) return base;
+  return base.replace(/(:\/\/[^:]+:)([^@]+)(@)/, (_, prefix, _old, suffix) => prefix + encodeURIComponent(password) + suffix);
+}
+const MONGO_URI = getMongoUri();
 const PORT = Number(process.env.PORT) || 3000;
 
 let db: import("mongodb").Db;
@@ -126,6 +133,21 @@ app.get("/api/documents/:id", async (req, res) => {
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Failed to fetch document" });
+  }
+});
+
+// Serve PDF file by document id (avoids Invalid PDF structure from wrong file_path URL)
+app.get("/api/documents/:id/file", async (req, res) => {
+  try {
+    const doc = await db.collection("documents").findOne({ id: req.params.id }, { projection: { file_path: 1, name: 1 } });
+    if (!doc?.file_path) return res.status(404).json({ error: "Document file not found" });
+    const filePath = path.isAbsolute(doc.file_path) ? doc.file_path : path.join(process.cwd(), doc.file_path);
+    if (!fs.existsSync(filePath)) return res.status(404).json({ error: "File not found" });
+    res.setHeader("Content-Type", "application/pdf");
+    res.sendFile(filePath);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to load file" });
   }
 });
 
