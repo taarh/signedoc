@@ -1,4 +1,8 @@
-import "dotenv/config";
+// Load .env only locally; Vercel injects env vars and dotenv uses dynamic require("fs") which fails in serverless
+if (!process.env.VERCEL) {
+  const dotenv = await import("dotenv");
+  dotenv.config();
+}
 import express from "express";
 import { createServer } from "http";
 import { Server } from "socket.io";
