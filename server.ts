@@ -79,8 +79,12 @@ const io = isVercel ? null : new Server(httpServer, { cors: { origin: "*" } });
 app.use(express.json());
 app.use("/uploads", express.static(UPLOAD_DIR));
 
-if (!fs.existsSync(UPLOAD_DIR)) {
-  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+try {
+  if (!fs.existsSync(UPLOAD_DIR)) {
+    fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+  }
+} catch (_) {
+  // On Vercel /tmp may have restrictions; ignore so the app still loads
 }
 
 const storage = multer.diskStorage({

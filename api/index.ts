@@ -1,26 +1,28 @@
 /**
- * Vercel serverless entry: forward all /api and /uploads requests to Express.
- * MongoDB is connected on first request (lazy init).
+ * Vercel serverless entry. Export the Express app so Vercel runs it directly.
+ * MongoDB is connected on first request via middleware.
  * Uses ./server.js produced by npm run build:server (see vercel buildCommand).
  */
 import { app, connectDb } from "./server.js";
 
 let dbReady: Promise<void> | null = null;
-
 function ensureDb() {
   if (!dbReady) dbReady = connectDb();
   return dbReady;
 }
 
-export default async function handler(req: import("http").IncomingMessage, res: import("http").ServerResponse) {
+app.use(async (_req, _res, next) => {
   try {
     await ensureDb();
-    app(req, res);
+    next();
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Database connection failed";
-    console.error("[api] MongoDB error:", message);
-    res.statusCode = 503;
-    res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify({ error: "Service unavailable", message }));
+    console.error("[api] MongoDB error:", err instanceof Error ? err.message : err);
+    next(err);
   }
-}
+});
+
+app.use((err: unknown, _req: import("express").Request, res: import("express").Response, _next: import("express").NextFunction) => {
+  res.status(503).json({ error: "Service unavailable", message: err instanceof Error ? err.message : "Database connection failed" });
+});
+
+export default app;
