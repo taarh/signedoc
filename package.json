@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "tsx server.ts",
     "build": "vite build",
+    "build:server": "node scripts/build-server.mjs",
     "preview": "vite preview",
     "start": "node --no-warnings=ExperimentalWarning --experimental-strip-types server.ts",
     "clean": "rm -rf dist",
@@ -55,6 +56,7 @@
     "tailwindcss": "^4.1.14",
     "tsx": "^4.21.0",
     "typescript": "~5.8.2",
-    "vite": "^6.2.0"
+    "vite": "^6.2.0",
+    "esbuild": "^0.24.0"
   }
 }
