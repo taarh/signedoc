@@ -7,9 +7,9 @@ import {
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { useDropzone } from "react-dropzone";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useLocation } from "react-router-dom";
 import toast from "react-hot-toast";
-import { format } from "date-fns";
+import { format, formatDistanceToNow } from "date-fns";
 import { io } from "socket.io-client";
 
 interface Document {
@@ -20,25 +20,53 @@ interface Document {
   signers?: any[];
 }
 
+interface ActivityEvent {
+  id: string;
+  document_id: string;
+  event: string;
+  timestamp: string;
+  details?: string;
+  user_name?: string;
+  doc_name?: string;
+}
+
 export function Dashboard() {
   const [documents, setDocuments] = useState<Document[]>([]);
+  const [activity, setActivity] = useState<ActivityEvent[]>([]);
   const [isUploadOpen, setIsUploadOpen] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const navigate = useNavigate();
+  const location = useLocation();
 
   useEffect(() => {
     fetchDocuments();
+    fetchActivity();
+
+    if (location.pathname === "/documents/new") {
+      setIsUploadOpen(true);
+    }
 
     const socket = io();
     socket.on("document_updated", () => {
       fetchDocuments();
+      fetchActivity();
       toast.success("Document status updated");
     });
 
     return () => {
       socket.disconnect();
     };
-  }, []);
+  }, [location.pathname]);
+
+  const fetchActivity = async () => {
+    try {
+      const res = await fetch("/api/activity?limit=10");
+      const data = await res.json();
+      setActivity(Array.isArray(data) ? data : []);
+    } catch {
+      setActivity([]);
+    }
+  };
 
   const fetchDocuments = async () => {
     try {
@@ -136,7 +164,7 @@ export function Dashboard() {
           { label: "Pending", value: documents.filter(d => d.status === 'sent').length, icon: Clock, color: "text-blue-600" },
           { label: "Completed", value: documents.filter(d => d.status === 'completed').length, icon: CheckCircle, color: "text-emerald-600" },
           { label: "Drafts", value: documents.filter(d => d.status === 'draft').length, icon: FileText, color: "text-slate-400" },
-          { label: "Activity", value: "+12%", icon: Activity, color: "text-slate-900" },
+          { label: "Activity", value: activity.length > 0 ? activity.length : "—", icon: Activity, color: "text-slate-900" },
         ].map((stat, i) => (
           <motion.div 
             key={i}
@@ -249,23 +277,33 @@ export function Dashboard() {
         <div className="space-y-8">
           <h2 className="text-2xl font-serif font-bold text-slate-900">Live Activity</h2>
           <div className="space-y-6">
-            {[
-              { user: "Sarah Connor", action: "signed", doc: "NDA_v2.pdf", time: "2m ago" },
-              { user: "John Wick", action: "viewed", doc: "Service_Agreement.pdf", time: "15m ago" },
-              { user: "System", action: "sent", doc: "Invoice_#442.pdf", time: "1h ago" },
-            ].map((activity, i) => (
-              <div key={i} className="flex gap-4">
-                <div className="w-10 h-10 rounded-full bg-slate-50 border border-slate-100 flex items-center justify-center shrink-0">
-                  <Activity className="w-4 h-4 text-slate-400" />
-                </div>
-                <div>
-                  <p className="text-sm text-slate-900">
-                    <span className="font-bold">{activity.user}</span> {activity.action} <span className="font-bold">{activity.doc}</span>
-                  </p>
-                  <p className="text-xs text-slate-400 mt-1">{activity.time}</p>
-                </div>
-              </div>
-            ))}
+            {activity.length === 0 ? (
+              <p className="text-sm text-slate-400">No activity yet. Upload a document and send it for signing to see events here.</p>
+            ) : (
+              activity.map((ev) => {
+                const label = ev.user_name
+                  ? `${ev.user_name} ${ev.event} ${ev.doc_name || ""}`
+                  : ev.doc_name
+                    ? `Document "${ev.doc_name}" ${ev.event}`
+                    : ev.details || `${ev.event}`;
+                const time = ev.timestamp
+                  ? formatDistanceToNow(new Date(ev.timestamp), { addSuffix: true })
+                  : "";
+                return (
+                  <div key={ev.id} className="flex gap-4">
+                    <div className="w-10 h-10 rounded-full bg-slate-50 border border-slate-100 flex items-center justify-center shrink-0">
+                      <Activity className="w-4 h-4 text-slate-400" />
+                    </div>
+                    <div>
+                      <p className="text-sm text-slate-900">
+                        {label}
+                      </p>
+                      {time && <p className="text-xs text-slate-400 mt-1">{time}</p>}
+                    </div>
+                  </div>
+                );
+              })
+            )}
           </div>
           
           <div className="bg-slate-900 rounded-3xl p-8 text-white relative overflow-hidden group">

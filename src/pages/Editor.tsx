@@ -1,10 +1,18 @@
 import { useState, useEffect, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { 
-  Plus, Users, FileText, Send, ChevronLeft, 
-  Type, Calendar, PenTool, Trash2, Settings,
-  Check, X, AlertCircle, Eye, MousePointer2,
-  Hand, ZoomIn, ZoomOut, Download, Share2
+import {
+  DndContext,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  useDraggable,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import { CSS } from "@dnd-kit/utilities";
+import {
+  Plus, Users, FileText, Send, ChevronLeft, X,
+  Type, Calendar, PenTool, Trash2, AlertCircle,
+  MousePointer2, Hand, ZoomIn, ZoomOut, Download, Share2
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { Viewer, Worker } from "@react-pdf-viewer/core";
@@ -31,6 +39,53 @@ interface Field {
   height: number;
 }
 
+function DraggableField({
+  field,
+  index,
+  signerName,
+  isSelected,
+  onRemove,
+}: {
+  field: Field;
+  index: number;
+  signerName: string;
+  isSelected: boolean;
+  onRemove: () => void;
+}) {
+  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
+    id: `field-${index}`,
+    data: { index, field },
+  });
+  const style = {
+    left: field.x,
+    top: field.y,
+    width: field.width,
+    height: field.height,
+    transform: transform ? CSS.Translate.toString(transform) : undefined,
+  };
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      {...listeners}
+      {...attributes}
+      className={`field-box group absolute ${isSelected ? "active" : ""} ${isDragging ? "z-50 opacity-90" : ""}`}
+    >
+      <div className="field-badge">{signerName}</div>
+      <span className="uppercase text-[10px] font-black tracking-widest text-slate-900">
+        {field.type}
+      </span>
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); onRemove(); }}
+        className="absolute -top-2 -right-2 bg-red-500 text-white p-1 rounded-full opacity-0 group-hover:opacity-100 hover:bg-red-600 transition-all shadow-lg"
+      >
+        <Trash2 className="w-3 h-3" />
+      </button>
+    </div>
+  );
+}
+
 export function Editor() {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -45,6 +100,24 @@ export function Editor() {
   
   const pdfContainerRef = useRef<HTMLDivElement>(null);
   const defaultLayoutPluginInstance = defaultLayoutPlugin();
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: { distance: 5 },
+    })
+  );
+
+  const handleDragEnd = (event: DragEndEvent) => {
+    const { active, delta } = event;
+    const index = active.data?.current?.index as number | undefined;
+    if (index == null || index < 0 || index >= fields.length) return;
+    const f = fields[index];
+    setFields((prev) => {
+      const next = [...prev];
+      next[index] = { ...next[index], x: f.x + delta.x, y: f.y + delta.y };
+      return next;
+    });
+  };
 
   useEffect(() => {
     fetchDocument();
@@ -154,7 +227,7 @@ export function Editor() {
   return (
     <div className="h-full flex flex-col -m-8 bg-[#F3F4F6]">
       {/* Top Navigation Bar */}
-      <div className="h-14 bg-slate-900 border-b border-white/5 flex items-center justify-between px-6 shrink-0 z-30">
+      <div className="h-20 bg-slate-900 border-b border-white/5 flex items-center justify-between px-8 shrink-0 z-30">
         <div className="flex items-center gap-6">
           <button onClick={() => navigate("/")} className="text-white/60 hover:text-white transition-colors">
             <ChevronLeft className="w-5 h-5" />
@@ -290,40 +363,22 @@ export function Editor() {
               </Worker>
             </div>
 
-            {/* Fields Overlay */}
-            {fields.map((field, index) => {
-              const signer = signers.find(s => s.id === field.signer_id);
-              return (
-                <motion.div
-                  key={index}
-                  drag
-                  dragMomentum={false}
-                  onDragEnd={(_, info) => {
-                    updateFieldPosition(index, field.x + info.offset.x, field.y + info.offset.y);
-                  }}
-                  style={{ 
-                    left: field.x, 
-                    top: field.y, 
-                    width: field.width, 
-                    height: field.height 
-                  }}
-                  className={`field-box group ${selectedSignerId === field.signer_id ? 'active' : ''}`}
-                >
-                  <div className="field-badge">
-                    {signer?.name || 'Unknown'}
-                  </div>
-                  <span className="uppercase text-[10px] font-black tracking-widest text-slate-900">
-                    {field.type}
-                  </span>
-                  <button 
-                    onClick={(e) => { e.stopPropagation(); removeField(index); }}
-                    className="absolute -top-2 -right-2 bg-red-500 text-white p-1 rounded-full opacity-0 group-hover:opacity-100 hover:bg-red-600 transition-all shadow-lg"
-                  >
-                    <Trash2 className="w-3 h-3" />
-                  </button>
-                </motion.div>
-              );
-            })}
+            {/* Fields Overlay - Dnd Kit for drag & drop */}
+            <DndContext sensors={sensors} onDragEnd={handleDragEnd}>
+              {fields.map((field, index) => {
+                const signer = signers.find((s) => s.id === field.signer_id);
+                return (
+                  <DraggableField
+                    key={field.id ?? index}
+                    field={field}
+                    index={index}
+                    signerName={signer?.name ?? "Unknown"}
+                    isSelected={selectedSignerId === field.signer_id}
+                    onRemove={() => removeField(index)}
+                  />
+                );
+              })}
+            </DndContext>
           </div>
         </div>
       </div>

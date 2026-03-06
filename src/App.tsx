@@ -12,8 +12,10 @@ export default function App() {
       <Routes>
         <Route path="/" element={<Layout />}>
           <Route index element={<Dashboard />} />
-          <Route path="editor/:id" element={<Editor />} />
+          <Route path="documents" element={<Dashboard />} />
+          <Route path="documents/new" element={<Dashboard />} />
         </Route>
+        <Route path="/editor/:id" element={<Editor />} />
         <Route path="sign/:token" element={<Sign />} />
       </Routes>
     </BrowserRouter>

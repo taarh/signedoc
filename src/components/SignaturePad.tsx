@@ -1,74 +1,57 @@
 import React, { useRef, useState, useEffect } from "react";
-import { X, RotateCcw, Check, PenTool, Type, MousePointer2 } from "lucide-react";
-import { motion } from "motion/react";
+import SignaturePadLib from "signature_pad";
+import { X, RotateCcw, Check, PenTool, Type } from "lucide-react";
 
 interface SignaturePadProps {
   onSave: (dataUrl: string) => void;
   onCancel: () => void;
 }
 
+const CANVAS_WIDTH = 500;
+const CANVAS_HEIGHT = 200;
+
 export function SignaturePad({ onSave, onCancel }: SignaturePadProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [isDrawing, setIsDrawing] = useState(false);
+  const padRef = useRef<SignaturePadLib | null>(null);
   const [activeTab, setActiveTab] = useState<'draw' | 'type'>('draw');
   const [typedName, setTypedName] = useState("");
 
+  // Initialize signature_pad when canvas is mounted (draw tab). Delay so modal/canvas is ready.
   useEffect(() => {
+    if (activeTab !== 'draw') return;
+
     const canvas = canvasRef.current;
-    if (canvas) {
-      const ctx = canvas.getContext("2d");
-      if (ctx) {
-        ctx.strokeStyle = "#0f172a";
-        ctx.lineWidth = 2.5;
-        ctx.lineCap = "round";
-        ctx.lineJoin = "round";
-      }
-    }
+    if (!canvas) return;
+
+    const t = setTimeout(() => {
+      const el = canvasRef.current;
+      if (!el) return;
+      padRef.current = new SignaturePadLib(el, {
+        penColor: "#0f172a",
+        minWidth: 1,
+        maxWidth: 2.5,
+        throttle: 8,
+        backgroundColor: "rgb(248, 250, 252)",
+      });
+    }, 100);
+
+    return () => {
+      clearTimeout(t);
+      padRef.current?.off();
+      padRef.current = null;
+    };
   }, [activeTab]);
 
-  const startDrawing = (e: React.MouseEvent | React.TouchEvent) => {
-    setIsDrawing(true);
-    draw(e);
-  };
-
-  const stopDrawing = () => {
-    setIsDrawing(false);
-    const canvas = canvasRef.current;
-    if (canvas) {
-      const ctx = canvas.getContext("2d");
-      ctx?.beginPath();
-    }
-  };
-
-  const draw = (e: React.MouseEvent | React.TouchEvent) => {
-    if (!isDrawing) return;
-    const canvas = canvasRef.current;
-    const ctx = canvas?.getContext("2d");
-    if (!canvas || !ctx) return;
-
-    const rect = canvas.getBoundingClientRect();
-    const x = ('touches' in e) ? e.touches[0].clientX - rect.left : e.clientX - rect.left;
-    const y = ('touches' in e) ? e.touches[0].clientY - rect.top : e.clientY - rect.top;
-
-    ctx.lineTo(x, y);
-    ctx.stroke();
-    ctx.moveTo(x, y);
-  };
-
   const clear = () => {
-    const canvas = canvasRef.current;
-    const ctx = canvas?.getContext("2d");
-    if (canvas && ctx) {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-    }
+    padRef.current?.clear();
     setTypedName("");
   };
 
   const handleSave = () => {
     if (activeTab === 'draw') {
-      const canvas = canvasRef.current;
-      if (canvas) {
-        onSave(canvas.toDataURL());
+      const pad = padRef.current;
+      if (pad && !pad.isEmpty()) {
+        onSave(pad.toDataURL("image/png"));
       }
     } else {
       // Create a canvas for the typed signature
@@ -122,30 +105,27 @@ export function SignaturePad({ onSave, onCancel }: SignaturePadProps) {
 
       <div className="p-10">
         {activeTab === 'draw' ? (
-          <div className="relative group">
-            <canvas
-              ref={canvasRef}
-              width={500}
-              height={200}
-              onMouseDown={startDrawing}
-              onMouseUp={stopDrawing}
-              onMouseMove={draw}
-              onTouchStart={startDrawing}
-              onTouchEnd={stopDrawing}
-              onTouchMove={draw}
-              className="w-full h-[200px] bg-slate-50 border-2 border-dashed border-slate-200 rounded-[32px] cursor-crosshair transition-colors group-hover:border-slate-300"
-            />
-            <div className="absolute bottom-6 right-6 flex items-center gap-3">
-              <button 
-                onClick={clear}
-                className="p-3 bg-white text-slate-400 hover:text-red-500 rounded-2xl shadow-lg border border-slate-100 transition-all active:scale-95"
-                title="Clear signature"
-              >
-                <RotateCcw className="w-4 h-4" />
-              </button>
+          <div className="relative group max-w-[500px]">
+            <p className="text-sm text-slate-500 mb-3">Dessinez votre signature dans la zone ci-dessous (souris ou doigt)</p>
+            <div className="relative" style={{ touchAction: 'none', pointerEvents: 'auto' }}>
+              <canvas
+                ref={canvasRef}
+                width={CANVAS_WIDTH}
+                height={CANVAS_HEIGHT}
+                style={{ width: CANVAS_WIDTH, height: CANVAS_HEIGHT, display: 'block' }}
+                className="bg-slate-50 border-2 border-dashed border-slate-200 rounded-[32px] cursor-crosshair transition-colors group-hover:border-slate-300 w-full"
+              />
             </div>
-            <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none opacity-20 group-hover:opacity-10 transition-opacity">
-              <MousePointer2 className="w-12 h-12 text-slate-900" />
+            <div className="mt-3 flex justify-end">
+              <button
+                type="button"
+                onClick={clear}
+                className="p-3 bg-slate-100 text-slate-500 hover:text-red-500 hover:bg-red-50 rounded-2xl border border-slate-200 transition-all active:scale-95 text-sm font-medium"
+                title="Effacer la signature"
+              >
+                <RotateCcw className="w-4 h-4 inline-block mr-1.5 align-middle" />
+                Effacer
+              </button>
             </div>
           </div>
         ) : (

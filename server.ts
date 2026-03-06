@@ -1,195 +1,334 @@
+import "dotenv/config";
 import express from "express";
 import { createServer } from "http";
 import { Server } from "socket.io";
-import { createServer as createViteServer } from "vite";
-import Database from "better-sqlite3";
+import { MongoClient } from "mongodb";
 import multer from "multer";
 import { v4 as uuidv4 } from "uuid";
 import path from "path";
 import fs from "fs";
+import os from "os";
 import { fileURLToPath } from "url";
+import { generateSignedPdf } from "./lib/generateSignedPdf";
+import { sendSigningLink, sendSignedPdfLink } from "./lib/sendMail";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const db = new Database("signflow.db");
+const MONGO_URI = process.env.MONGO_URI || "mongodb://localhost:27017/signflow";
+const PORT = Number(process.env.PORT) || 3000;
 
-// Initialize DB
-db.exec(`
-  CREATE TABLE IF NOT EXISTS documents (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    status TEXT DEFAULT 'draft',
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    file_path TEXT NOT NULL
-  );
+let db: import("mongodb").Db;
 
-  CREATE TABLE IF NOT EXISTS signers (
-    id TEXT PRIMARY KEY,
-    document_id TEXT NOT NULL,
-    email TEXT NOT NULL,
-    name TEXT NOT NULL,
-    status TEXT DEFAULT 'pending',
-    access_token TEXT NOT NULL,
-    FOREIGN KEY(document_id) REFERENCES documents(id)
-  );
+async function connectDb() {
+  const client = new MongoClient(MONGO_URI);
+  const maxAttempts = process.env.VERCEL ? 3 : 30;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await client.connect();
+      break;
+    } catch (e) {
+      if (attempt === maxAttempts) throw e;
+      console.log(`MongoDB connection attempt ${attempt}/${maxAttempts}, retrying in 2s...`);
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  }
+  db = client.db();
+  await db.collection("documents").createIndex({ id: 1 }, { unique: true });
+  await db.collection("documents").createIndex({ created_at: -1 });
+  await db.collection("signers").createIndex({ document_id: 1 });
+  await db.collection("signers").createIndex({ access_token: 1 }, { unique: true });
+  await db.collection("fields").createIndex({ document_id: 1 });
+  await db.collection("audit_trail").createIndex({ timestamp: -1 });
+  await db.collection("audit_trail").createIndex({ document_id: 1 });
+  console.log("MongoDB connected");
+}
 
-  CREATE TABLE IF NOT EXISTS fields (
-    id TEXT PRIMARY KEY,
-    document_id TEXT NOT NULL,
-    signer_id TEXT NOT NULL,
-    type TEXT NOT NULL,
-    x REAL NOT NULL,
-    y REAL NOT NULL,
-    page INTEGER NOT NULL,
-    width REAL NOT NULL,
-    height REAL NOT NULL,
-    value TEXT,
-    FOREIGN KEY(document_id) REFERENCES documents(id),
-    FOREIGN KEY(signer_id) REFERENCES signers(id)
-  );
+type AuditEvent = "uploaded" | "sent" | "signed" | "completed";
 
-  CREATE TABLE IF NOT EXISTS audit_trail (
-    id TEXT PRIMARY KEY,
-    document_id TEXT NOT NULL,
-    event TEXT NOT NULL,
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-    details TEXT,
-    FOREIGN KEY(document_id) REFERENCES documents(id)
-  );
-`);
+async function addAudit(documentId: string, event: AuditEvent, details?: string, userName?: string, docName?: string) {
+  await db.collection("audit_trail").insertOne({
+    id: uuidv4(),
+    document_id: documentId,
+    event,
+    timestamp: new Date(),
+    details: details ?? null,
+    user_name: userName ?? null,
+    doc_name: docName ?? null,
+  });
+}
+
+const isVercel = Boolean(process.env.VERCEL);
+const UPLOAD_DIR = isVercel ? path.join(os.tmpdir(), "signedoc-uploads") : path.join(process.cwd(), "uploads");
 
 const app = express();
 const httpServer = createServer(app);
-const io = new Server(httpServer, {
-  cors: {
-    origin: "*",
-  },
-});
+const io = isVercel ? null : new Server(httpServer, { cors: { origin: "*" } });
 
 app.use(express.json());
-app.use("/uploads", express.static("uploads"));
+app.use("/uploads", express.static(UPLOAD_DIR));
 
-// Ensure uploads directory exists
-if (!fs.existsSync("uploads")) {
-  fs.mkdirSync("uploads");
+if (!fs.existsSync(UPLOAD_DIR)) {
+  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 }
 
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, "uploads/");
-  },
-  filename: (req, file, cb) => {
-    cb(null, `${uuidv4()}-${file.originalname}`);
-  },
+  destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
+  filename: (_req, file, cb) => cb(null, `${uuidv4()}-${file.originalname}`),
 });
-
 const upload = multer({ storage });
 
-// API Routes
-app.post("/api/documents/upload", upload.single("file"), (req, res) => {
-  if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+// ----- API Routes -----
 
-  const id = uuidv4();
-  const name = req.file.originalname;
-  const file_path = req.file.path;
-
-  db.prepare("INSERT INTO documents (id, name, file_path) VALUES (?, ?, ?)").run(id, name, file_path);
-
-  res.json({ id, name });
-});
-
-app.get("/api/documents", (req, res) => {
-  const docs = db.prepare("SELECT * FROM documents ORDER BY created_at DESC").all();
-  res.json(docs);
-});
-
-app.get("/api/documents/:id", (req, res) => {
-  const doc = db.prepare("SELECT * FROM documents WHERE id = ?").get(req.params.id);
-  if (!doc) return res.status(404).json({ error: "Document not found" });
-
-  const signers = db.prepare("SELECT * FROM signers WHERE document_id = ?").all(req.params.id);
-  const fields = db.prepare("SELECT * FROM fields WHERE document_id = ?").all(req.params.id);
-
-  res.json({ ...doc, signers, fields });
-});
-
-app.post("/api/documents/:id/signers", (req, res) => {
-  const { signers } = req.body;
-  const docId = req.params.id;
-
-  const insert = db.prepare("INSERT INTO signers (id, document_id, email, name, access_token) VALUES (?, ?, ?, ?, ?)");
-  
-  const results = signers.map((s: any) => {
+app.post("/api/documents/upload", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "No file uploaded" });
     const id = uuidv4();
-    const token = uuidv4();
-    insert.run(id, docId, s.email, s.name, token);
-    return { id, token };
-  });
-
-  res.json(results);
-});
-
-app.post("/api/documents/:id/fields", (req, res) => {
-  const { fields } = req.body;
-  const docId = req.params.id;
-
-  db.prepare("DELETE FROM fields WHERE document_id = ?").run(docId);
-
-  const insert = db.prepare("INSERT INTO fields (id, document_id, signer_id, type, x, y, page, width, height) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
-  
-  fields.forEach((f: any) => {
-    insert.run(uuidv4(), docId, f.signer_id, f.type, f.x, f.y, f.page, f.width, f.height);
-  });
-
-  res.json({ success: true });
-});
-
-app.post("/api/documents/:id/send", (req, res) => {
-  db.prepare("UPDATE documents SET status = 'sent' WHERE id = ?").run(req.params.id);
-  
-  // In a real app, send emails here
-  const signers = db.prepare("SELECT * FROM signers WHERE document_id = ?").all(req.params.id);
-  
-  res.json({ success: true, signers });
-});
-
-app.get("/api/sign/:token", (req, res) => {
-  const signer = db.prepare("SELECT * FROM signers WHERE access_token = ?").get(req.params.token);
-  if (!signer) return res.status(404).json({ error: "Invalid token" });
-
-  const doc = db.prepare("SELECT * FROM documents WHERE id = ?").get(signer.document_id);
-  const fields = db.prepare("SELECT * FROM fields WHERE document_id = ? AND signer_id = ?").all(signer.document_id, signer.id);
-
-  res.json({ signer, doc, fields });
-});
-
-app.post("/api/sign/:token", (req, res) => {
-  const { signatures } = req.body; // Array of { fieldId, value }
-  const signer = db.prepare("SELECT * FROM signers WHERE access_token = ?").get(req.params.token);
-  if (!signer) return res.status(404).json({ error: "Invalid token" });
-
-  const updateField = db.prepare("UPDATE fields SET value = ? WHERE id = ?");
-  signatures.forEach((s: any) => {
-    updateField.run(s.value, s.fieldId);
-  });
-
-  db.prepare("UPDATE signers SET status = 'signed' WHERE id = ?").run(signer.id);
-
-  // Check if all signers signed
-  const remaining = db.prepare("SELECT COUNT(*) as count FROM signers WHERE document_id = ? AND status != 'signed'").get(signer.document_id);
-  
-  if (remaining.count === 0) {
-    db.prepare("UPDATE documents SET status = 'completed' WHERE id = ?").run(signer.document_id);
+    const name = req.file.originalname;
+    const file_path = req.file.path;
+    await db.collection("documents").insertOne({
+      id,
+      name,
+      file_path,
+      status: "draft",
+      created_at: new Date(),
+    });
+    await addAudit(id, "uploaded", `Document "${name}" uploaded`, undefined, name);
+    res.json({ id, name });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Upload failed" });
   }
-
-  io.emit("document_updated", { documentId: signer.document_id });
-
-  res.json({ success: true });
 });
 
-// Vite Middleware
-if (process.env.NODE_ENV !== "production") {
+app.get("/api/documents", async (_req, res) => {
+  try {
+    const docs = await db
+      .collection("documents")
+      .find({})
+      .sort({ created_at: -1 })
+      .project({ _id: 0 })
+      .toArray();
+    res.json(docs);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to fetch documents" });
+  }
+});
+
+app.get("/api/documents/:id", async (req, res) => {
+  try {
+    const doc = await db.collection("documents").findOne({ id: req.params.id }, { projection: { _id: 0 } });
+    if (!doc) return res.status(404).json({ error: "Document not found" });
+    const signers = await db.collection("signers").find({ document_id: req.params.id }).project({ _id: 0 }).toArray();
+    const fields = await db.collection("fields").find({ document_id: req.params.id }).project({ _id: 0 }).toArray();
+    res.json({ ...doc, signers, fields });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to fetch document" });
+  }
+});
+
+app.post("/api/documents/:id/signers", async (req, res) => {
+  try {
+    const { signers: signersBody } = req.body;
+    const docId = req.params.id;
+    const doc = await db.collection("documents").findOne({ id: docId });
+    if (!doc) return res.status(404).json({ error: "Document not found" });
+    const results: { id: string; token: string }[] = [];
+    for (const s of signersBody) {
+      const id = uuidv4();
+      const token = uuidv4();
+      await db.collection("signers").insertOne({
+        id,
+        document_id: docId,
+        email: s.email,
+        name: s.name,
+        status: "pending",
+        access_token: token,
+      });
+      results.push({ id, token });
+    }
+    res.json(results);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to add signers" });
+  }
+});
+
+app.post("/api/documents/:id/fields", async (req, res) => {
+  try {
+    const { fields } = req.body;
+    const docId = req.params.id;
+    await db.collection("fields").deleteMany({ document_id: docId });
+    for (const f of fields) {
+      await db.collection("fields").insertOne({
+        id: uuidv4(),
+        document_id: docId,
+        signer_id: f.signer_id,
+        type: f.type,
+        x: f.x,
+        y: f.y,
+        page: f.page,
+        width: f.width,
+        height: f.height,
+        value: null,
+      });
+    }
+    res.json({ success: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to save fields" });
+  }
+});
+
+app.post("/api/documents/:id/send", async (req, res) => {
+  try {
+    const docId = req.params.id;
+    const doc = await db.collection("documents").findOne({ id: docId });
+    if (!doc) return res.status(404).json({ error: "Document not found" });
+    await db.collection("documents").updateOne({ id: docId }, { $set: { status: "sent" } });
+    const signers = await db.collection("signers").find({ document_id: docId }).project({ _id: 0 }).toArray();
+    await addAudit(docId, "sent", `Workflow sent to ${signers.length} signer(s)`, undefined, doc.name);
+
+    // Envoyer l'email à chaque signataire avec le lien de signature
+    const baseUrl = (process.env.BASE_URL || process.env.APP_URL || "").replace(/\/$/, "") || `http://localhost:${PORT}`;
+    for (const signer of signers) {
+      await sendSigningLink({
+        signerName: signer.name,
+        signerEmail: signer.email,
+        documentName: doc.name,
+        signToken: signer.access_token,
+      });
+    }
+
+    res.json({ success: true, signers });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to send" });
+  }
+});
+
+app.get("/api/activity", async (req, res) => {
+  try {
+    const limit = Math.min(Number(req.query.limit) || 20, 50);
+    const events = await db
+      .collection("audit_trail")
+      .find({})
+      .sort({ timestamp: -1 })
+      .limit(limit)
+      .project({ _id: 0 })
+      .toArray();
+    res.json(events);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to fetch activity" });
+  }
+});
+
+app.get("/api/documents/:id/signed-pdf", async (req, res) => {
+  try {
+    const doc = await db.collection("documents").findOne({ id: req.params.id }, { projection: { signed_file_path: 1, name: 1 } });
+    if (!doc?.signed_file_path) return res.status(404).json({ error: "Signed PDF not ready" });
+    const filePath = path.isAbsolute(doc.signed_file_path) ? doc.signed_file_path : path.join(process.cwd(), doc.signed_file_path);
+    if (!fs.existsSync(filePath)) return res.status(404).json({ error: "Signed file not found" });
+    res.download(filePath, doc.name ? doc.name.replace(/\.pdf$/i, "-signed.pdf") : "signed.pdf");
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Download failed" });
+  }
+});
+
+app.get("/api/sign/:token", async (req, res) => {
+  try {
+    const signer = await db.collection("signers").findOne({ access_token: req.params.token }, { projection: { _id: 0 } });
+    if (!signer) return res.status(404).json({ error: "Invalid token" });
+    const doc = await db.collection("documents").findOne({ id: signer.document_id }, { projection: { _id: 0 } });
+    if (!doc) return res.status(404).json({ error: "Document not found" });
+    const fields = await db
+      .collection("fields")
+      .find({ document_id: signer.document_id, signer_id: signer.id })
+      .project({ _id: 0 })
+      .toArray();
+    res.json({ signer, doc, fields });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to load signing session" });
+  }
+});
+
+app.post("/api/sign/:token", async (req, res) => {
+  try {
+    const { signatures } = req.body;
+    const signer = await db.collection("signers").findOne({ access_token: req.params.token }, { projection: { _id: 0 } });
+    if (!signer) return res.status(404).json({ error: "Invalid token" });
+    const doc = await db.collection("documents").findOne({ id: signer.document_id }, { projection: { _id: 0 } });
+    if (!doc) return res.status(404).json({ error: "Document not found" });
+
+    for (const s of signatures) {
+      await db.collection("fields").updateOne({ id: s.fieldId }, { $set: { value: s.value } });
+    }
+    await db.collection("signers").updateOne({ id: signer.id }, { $set: { status: "signed" } });
+    await addAudit(signer.document_id, "signed", null, signer.name, doc.name);
+
+    const remaining = await db.collection("signers").countDocuments({ document_id: signer.document_id, status: { $ne: "signed" } });
+    if (remaining === 0) {
+      await db.collection("documents").updateOne({ id: signer.document_id }, { $set: { status: "completed" } });
+      await addAudit(signer.document_id, "completed", "All signers have signed", undefined, doc.name);
+
+      // Generate signed PDF with pdf-lib (embed signatures, text, dates)
+      try {
+        const allFields = await db.collection("fields").find({ document_id: signer.document_id }).toArray();
+        const fieldsWithValue = allFields.map((f: any) => ({
+          id: f.id,
+          type: f.type,
+          x: f.x,
+          y: f.y,
+          page: f.page ?? 1,
+          width: f.width,
+          height: f.height,
+          value: f.value ?? null,
+        }));
+        const sourcePath = path.isAbsolute(doc.file_path) ? doc.file_path : path.join(process.cwd(), doc.file_path);
+        const signedPath = path.join(path.dirname(sourcePath), `signed-${signer.document_id}.pdf`);
+        await generateSignedPdf(sourcePath, fieldsWithValue, signedPath);
+        await db.collection("documents").updateOne(
+          { id: signer.document_id },
+          { $set: { signed_file_path: signedPath } }
+        );
+        const baseUrl = (process.env.BASE_URL || process.env.APP_URL || "").replace(/\/$/, "") || `http://localhost:${PORT}`;
+        const downloadUrl = `${baseUrl}/api/documents/${signer.document_id}/signed-pdf`;
+        const allSigners = await db.collection("signers").find({ document_id: signer.document_id }).toArray();
+        for (const s of allSigners) {
+          await sendSignedPdfLink({
+            signerEmail: s.email,
+            signerName: s.name,
+            documentName: doc.name,
+            downloadUrl,
+          });
+        }
+      } catch (err) {
+        console.error("Failed to generate signed PDF:", err);
+      }
+    }
+
+    if (io) io.emit("document_updated", { documentId: signer.document_id });
+    res.json({ success: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to submit signature" });
+  }
+});
+
+// ----- Static / Vite -----
+const distPath = path.join(process.cwd(), "dist");
+if (process.env.NODE_ENV === "production") {
+  app.use(express.static(distPath));
+  app.get("*", (_req, res) => {
+    res.sendFile(path.join(distPath, "index.html"));
+  });
+} else {
+  const { createServer: createViteServer } = await import("vite");
   const vite = await createViteServer({
     server: { middlewareMode: true },
     appType: "spa",
@@ -197,7 +336,18 @@ if (process.env.NODE_ENV !== "production") {
   app.use(vite.middlewares);
 }
 
-const PORT = 3000;
-httpServer.listen(PORT, "0.0.0.0", () => {
-  console.log(`Server running on http://localhost:${PORT}`);
-});
+async function start() {
+  await connectDb();
+  httpServer.listen(PORT, "0.0.0.0", () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+  });
+}
+
+export { app, connectDb };
+
+if (!process.env.VERCEL) {
+  start().catch((err) => {
+    console.error("Failed to start:", err);
+    process.exit(1);
+  });
+}
