@@ -19,6 +19,9 @@ await esbuild.build({
   define: {
     "process.env.VERCEL": '"1"',
   },
+  banner: {
+    js: "import { createRequire } from 'module'; const require = createRequire(import.meta.url);",
+  },
 }).catch(() => process.exit(1));
 
 console.log("api/server.js created");
