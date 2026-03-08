@@ -31,6 +31,12 @@ const PORT = Number(process.env.PORT) || 3000;
 
 let db: import("mongodb").Db;
 
+let dbReady: Promise<void> | null = null;
+function ensureDb() {
+  if (!dbReady) dbReady = connectDb();
+  return dbReady;
+}
+
 async function connectDb() {
   const client = new MongoClient(MONGO_URI);
   const maxAttempts = process.env.VERCEL ? 3 : 30;
@@ -77,6 +83,15 @@ const httpServer = createServer(app);
 const io = isVercel ? null : new Server(httpServer, { cors: { origin: "*" } });
 
 app.use(express.json());
+// Ensure MongoDB is connected before any route that uses db (must run first)
+app.use(async (_req, _res, next) => {
+  try {
+    await ensureDb();
+    next();
+  } catch (e) {
+    next(e);
+  }
+});
 app.use("/uploads", express.static(UPLOAD_DIR));
 
 try {
@@ -348,6 +363,12 @@ app.post("/api/sign/:token", async (req, res) => {
     console.error(e);
     res.status(500).json({ error: "Failed to submit signature" });
   }
+});
+
+// Error handler for DB connection failures and other passed errors
+app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  console.error("[server] Error:", err instanceof Error ? err.message : err);
+  res.status(503).json({ error: "Service unavailable", message: err instanceof Error ? err.message : "Database connection failed" });
 });
 
 // ----- Static / Vite -----
