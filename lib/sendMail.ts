@@ -1,11 +1,9 @@
 /**
- * Email sending via nodemailer.
- * Configure SMTP in .env to enable; if not set, sendSigningLinks will no-op.
+ * Email sending: Resend (HTTP API, recommended on Vercel) or Nodemailer (SMTP).
+ * Set RESEND_API_KEY or SMTP_* in .env. On Vercel, Resend avoids "Unexpected socket close" with SMTP.
  */
-import nodemailer from "nodemailer";
-
-const BASE_URL = process.env.BASE_URL || process.env.APP_URL || "http://localhost:3000";
-const MAIL_FROM = process.env.MAIL_FROM || '"SignFlow" <noreply@localhost>';
+const BASE_URL = (process.env.BASE_URL || process.env.APP_URL || "http://localhost:3000").replace(/\/$/, "");
+const MAIL_FROM = process.env.MAIL_FROM || process.env.RESEND_FROM || '"SignFlow" <noreply@localhost>';
 
 function getTransporter() {
   const host = process.env.SMTP_HOST;
@@ -16,11 +14,45 @@ function getTransporter() {
     process.env.SMTP_USER && process.env.SMTP_PASS
       ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
       : undefined;
-  return nodemailer.createTransport({ host, port, secure, auth });
+  return nodemailer.createTransport({
+    host,
+    port,
+    secure,
+    auth,
+    pool: false,
+    connectionTimeout: 8000,
+    greetingTimeout: 5000,
+    socketTimeout: 10000,
+  });
+}
+
+async function sendViaResend(to: string, subject: string, text: string, html: string): Promise<boolean> {
+  const key = process.env.RESEND_API_KEY;
+  if (!key) return false;
+  const from = process.env.RESEND_FROM || process.env.MAIL_FROM || "onboarding@resend.dev";
+  try {
+    const res = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${key}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ from, to: [to], subject, text, html }),
+    });
+    if (!res.ok) {
+      const err = await res.text();
+      console.error("[Mail] Resend error:", res.status, err);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error("[Mail] Resend request failed:", err);
+    return false;
+  }
 }
 
 export function isMailConfigured(): boolean {
-  return Boolean(process.env.SMTP_HOST);
+  return Boolean(process.env.RESEND_API_KEY || process.env.SMTP_HOST);
 }
 
 export interface SigningLinkPayload {
@@ -31,12 +63,7 @@ export interface SigningLinkPayload {
 }
 
 export async function sendSigningLink(payload: SigningLinkPayload): Promise<boolean> {
-  const transporter = getTransporter();
-  if (!transporter) {
-    console.log("[Mail] SMTP not configured. Sign link:", `${BASE_URL}/sign/${payload.signToken}`);
-    return false;
-  }
-  const signUrl = `${BASE_URL.replace(/\/$/, "")}/sign/${payload.signToken}`;
+  const signUrl = `${BASE_URL}/sign/${payload.signToken}`;
   const subject = `Document à signer : ${payload.documentName}`;
   const text = `
 Bonjour ${payload.signerName},
@@ -56,6 +83,17 @@ Ce lien est personnel et sécurisé.
 <p style="color:#64748b; font-size:12px;">Ou copiez ce lien : <br/><a href="${signUrl}">${signUrl}</a></p>
 <p style="color:#64748b; font-size:12px;">Ce lien est personnel et sécurisé.</p>
   `.trim();
+
+  if (process.env.RESEND_API_KEY) {
+    const ok = await sendViaResend(payload.signerEmail, subject, text, html);
+    if (ok) return true;
+    console.error("[Mail] Resend failed for signing link, fallback to SMTP if configured");
+  }
+  const transporter = getTransporter();
+  if (!transporter) {
+    console.log("[Mail] No mail configured. Sign link:", signUrl);
+    return false;
+  }
   try {
     await transporter.sendMail({
       from: MAIL_FROM,
@@ -77,11 +115,6 @@ export async function sendSignedPdfLink(payload: {
   documentName: string;
   downloadUrl: string;
 }): Promise<boolean> {
-  const transporter = getTransporter();
-  if (!transporter) {
-    console.log("[Mail] SMTP not configured. Signed PDF download:", payload.downloadUrl);
-    return false;
-  }
   const subject = `Document signé : ${payload.documentName}`;
   const text = `
 Bonjour ${payload.signerName},
@@ -95,6 +128,16 @@ Téléchargez votre copie ici : ${payload.downloadUrl}
 <p>Le document <strong>${payload.documentName}</strong> a été signé par tous les signataires.</p>
 <p><a href="${payload.downloadUrl}" style="display:inline-block; padding:12px 24px; background:#0f172a; color:#fff; text-decoration:none; border-radius:9999px;">Télécharger le PDF signé</a></p>
   `.trim();
+
+  if (process.env.RESEND_API_KEY) {
+    const ok = await sendViaResend(payload.signerEmail, subject, text, html);
+    if (ok) return true;
+  }
+  const transporter = getTransporter();
+  if (!transporter) {
+    console.log("[Mail] No mail configured. Signed PDF download:", payload.downloadUrl);
+    return false;
+  }
   try {
     await transporter.sendMail({
       from: MAIL_FROM,
