@@ -13,11 +13,14 @@ import path from "path";
 import fs from "fs";
 import os from "os";
 import { fileURLToPath } from "url";
+import { put as blobPut } from "@vercel/blob";
 import { generateSignedPdf } from "./lib/generateSignedPdf";
 import { sendSigningLink, sendSignedPdfLink } from "./lib/sendMail";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const isVercel = Boolean(process.env.VERCEL);
+const hasBlob = Boolean(process.env.BLOB_READ_WRITE_TOKEN);
 
 // If MONGO_PASSWORD is set, inject it (URL-encoded) into MONGO_URI to support special characters
 function getMongoUri(): string {
@@ -75,7 +78,6 @@ async function addAudit(documentId: string, event: AuditEvent, details?: string,
   });
 }
 
-const isVercel = Boolean(process.env.VERCEL);
 const UPLOAD_DIR = isVercel ? path.join(os.tmpdir(), "signedoc-uploads") : path.join(process.cwd(), "uploads");
 
 const app = express();
@@ -116,13 +118,23 @@ app.post("/api/documents/upload", upload.single("file"), async (req, res) => {
     const id = uuidv4();
     const name = req.file.originalname;
     const file_path = req.file.path;
-    await db.collection("documents").insertOne({
+    const docPayload: { id: string; name: string; file_path: string; status: string; created_at: Date; blob_url?: string } = {
       id,
       name,
       file_path,
       status: "draft",
       created_at: new Date(),
-    });
+    };
+    if (hasBlob) {
+      try {
+        const buf = fs.readFileSync(file_path);
+        const blob = await blobPut(`documents/${id}/${name}`, buf, { access: "public", contentType: "application/pdf" });
+        docPayload.blob_url = blob.url;
+      } catch (e) {
+        console.error("[Blob] Upload failed:", e);
+      }
+    }
+    await db.collection("documents").insertOne(docPayload);
     await addAudit(id, "uploaded", `Document "${name}" uploaded`, undefined, name);
     res.json({ id, name });
   } catch (e) {
@@ -159,11 +171,15 @@ app.get("/api/documents/:id", async (req, res) => {
   }
 });
 
-// Serve PDF file by document id (avoids Invalid PDF structure from wrong file_path URL)
+// Serve PDF file by document id (local file_path or redirect to Blob on Vercel)
 app.get("/api/documents/:id/file", async (req, res) => {
   try {
-    const doc = await db.collection("documents").findOne({ id: req.params.id }, { projection: { file_path: 1, name: 1 } });
-    if (!doc?.file_path) return res.status(404).json({ error: "Document file not found" });
+    const doc = await db.collection("documents").findOne({ id: req.params.id }, { projection: { file_path: 1, blob_url: 1, name: 1 } });
+    if (!doc) return res.status(404).json({ error: "Document file not found" });
+    if (doc.blob_url) {
+      return res.redirect(302, doc.blob_url);
+    }
+    if (!doc.file_path) return res.status(404).json({ error: "Document file not found" });
     const filePath = path.isAbsolute(doc.file_path) ? doc.file_path : path.join(process.cwd(), doc.file_path);
     if (!fs.existsSync(filePath)) return res.status(404).json({ error: "File not found" });
     res.setHeader("Content-Type", "application/pdf");
@@ -273,8 +289,12 @@ app.get("/api/activity", async (req, res) => {
 
 app.get("/api/documents/:id/signed-pdf", async (req, res) => {
   try {
-    const doc = await db.collection("documents").findOne({ id: req.params.id }, { projection: { signed_file_path: 1, name: 1 } });
-    if (!doc?.signed_file_path) return res.status(404).json({ error: "Signed PDF not ready" });
+    const doc = await db.collection("documents").findOne({ id: req.params.id }, { projection: { signed_file_path: 1, signed_blob_url: 1, name: 1 } });
+    if (!doc) return res.status(404).json({ error: "Signed PDF not ready" });
+    if (doc.signed_blob_url) {
+      return res.redirect(302, doc.signed_blob_url);
+    }
+    if (!doc.signed_file_path) return res.status(404).json({ error: "Signed PDF not ready" });
     const filePath = path.isAbsolute(doc.signed_file_path) ? doc.signed_file_path : path.join(process.cwd(), doc.signed_file_path);
     if (!fs.existsSync(filePath)) return res.status(404).json({ error: "Signed file not found" });
     res.download(filePath, doc.name ? doc.name.replace(/\.pdf$/i, "-signed.pdf") : "signed.pdf");
@@ -334,13 +354,34 @@ app.post("/api/sign/:token", async (req, res) => {
           height: f.height,
           value: f.value ?? null,
         }));
-        const sourcePath = path.isAbsolute(doc.file_path) ? doc.file_path : path.join(process.cwd(), doc.file_path);
-        const signedPath = path.join(path.dirname(sourcePath), `signed-${signer.document_id}.pdf`);
+        const tmpDir = os.tmpdir();
+        let sourcePath: string;
+        let signedPath: string;
+        if (doc.blob_url && hasBlob) {
+          const resPdf = await fetch(doc.blob_url);
+          if (!resPdf.ok) throw new Error("Failed to fetch source PDF from blob");
+          const buf = Buffer.from(await resPdf.arrayBuffer());
+          sourcePath = path.join(tmpDir, `source-${signer.document_id}.pdf`);
+          signedPath = path.join(tmpDir, `signed-${signer.document_id}.pdf`);
+          fs.writeFileSync(sourcePath, buf);
+        } else {
+          sourcePath = path.isAbsolute(doc.file_path) ? doc.file_path : path.join(process.cwd(), doc.file_path);
+          signedPath = path.join(path.dirname(sourcePath), `signed-${signer.document_id}.pdf`);
+        }
         await generateSignedPdf(sourcePath, fieldsWithValue, signedPath);
-        await db.collection("documents").updateOne(
-          { id: signer.document_id },
-          { $set: { signed_file_path: signedPath } }
-        );
+        if (doc.blob_url && hasBlob) {
+          const signedBuf = fs.readFileSync(signedPath);
+          const blob = await blobPut(`documents/${signer.document_id}/signed.pdf`, signedBuf, { access: "public", contentType: "application/pdf" });
+          await db.collection("documents").updateOne(
+            { id: signer.document_id },
+            { $set: { signed_blob_url: blob.url } }
+          );
+        } else {
+          await db.collection("documents").updateOne(
+            { id: signer.document_id },
+            { $set: { signed_file_path: signedPath } }
+          );
+        }
         const baseUrl = (process.env.BASE_URL || process.env.APP_URL || "").replace(/\/$/, "") || `http://localhost:${PORT}`;
         const downloadUrl = `${baseUrl}/api/documents/${signer.document_id}/signed-pdf`;
         const allSigners = await db.collection("signers").find({ document_id: signer.document_id }).toArray();
