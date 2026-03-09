@@ -356,7 +356,7 @@ export function Editor() {
                   <input
                     type="text"
                     value={item.label}
-                    onChange={(e) => setRequestedAttachments((prev) => prev.map((p) => p.id === item.id ? { ...p, label: e.target.value } : p)))}
+                    onChange={(e) => setRequestedAttachments((prev) => prev.map((p) => p.id === item.id ? { ...p, label: e.target.value } : p))}
                     placeholder="Ex. Carte d'identité"
                     className="flex-1 px-3 py-2 text-xs border border-slate-200 rounded-lg focus:ring-2 focus:ring-slate-900/10 focus:border-slate-900 outline-none"
                   />
