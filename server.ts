@@ -20,6 +20,10 @@ import { sendSigningLink, sendSignedPdfLink } from "./lib/sendMail";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const isVercel = Boolean(process.env.VERCEL);
+// Support both default BLOB_READ_WRITE_TOKEN and project-prefixed tokens (e.g. SIGNEDOC_BLOB_READ_WRITE_TOKEN)
+const BLOB_TOKEN =
+  process.env.BLOB_READ_WRITE_TOKEN ||
+  Object.entries(process.env).find(([key]) => key.endsWith("_BLOB_READ_WRITE_TOKEN"))?.[1];
 
 // If MONGO_PASSWORD is set, inject it (URL-encoded) into MONGO_URI to support special characters
 function getMongoUri(): string {
@@ -125,11 +129,15 @@ app.post("/api/documents/upload", upload.single("file"), async (req, res) => {
       created_at: new Date(),
     };
     // If a Blob token is configured (on Vercel), upload the PDF to Blob storage
-    if (process.env.BLOB_READ_WRITE_TOKEN) {
+    if (BLOB_TOKEN) {
       try {
         console.log("[Blob] Uploading original PDF to Blob for document", id);
         const buf = fs.readFileSync(file_path);
-        const blob = await blobPut(`documents/${id}/${name}`, buf, { access: "public", contentType: "application/pdf" });
+        const blob = await blobPut(`documents/${id}/${name}`, buf, {
+          access: "public",
+          contentType: "application/pdf",
+          token: BLOB_TOKEN,
+        });
         docPayload.blob_url = blob.url;
       } catch (e) {
         console.error("[Blob] Upload failed:", e);
@@ -358,7 +366,7 @@ app.post("/api/sign/:token", async (req, res) => {
         const tmpDir = os.tmpdir();
         let sourcePath: string;
         let signedPath: string;
-        if (doc.blob_url && process.env.BLOB_READ_WRITE_TOKEN) {
+        if (doc.blob_url && BLOB_TOKEN) {
           const resPdf = await fetch(doc.blob_url);
           if (!resPdf.ok) throw new Error("Failed to fetch source PDF from blob");
           const buf = Buffer.from(await resPdf.arrayBuffer());
@@ -370,9 +378,13 @@ app.post("/api/sign/:token", async (req, res) => {
           signedPath = path.join(path.dirname(sourcePath), `signed-${signer.document_id}.pdf`);
         }
         await generateSignedPdf(sourcePath, fieldsWithValue, signedPath);
-        if (doc.blob_url && process.env.BLOB_READ_WRITE_TOKEN) {
+        if (doc.blob_url && BLOB_TOKEN) {
           const signedBuf = fs.readFileSync(signedPath);
-          const blob = await blobPut(`documents/${signer.document_id}/signed.pdf`, signedBuf, { access: "public", contentType: "application/pdf" });
+          const blob = await blobPut(`documents/${signer.document_id}/signed.pdf`, signedBuf, {
+            access: "public",
+            contentType: "application/pdf",
+            token: BLOB_TOKEN,
+          });
           await db.collection("documents").updateOne(
             { id: signer.document_id },
             { $set: { signed_blob_url: blob.url } }
