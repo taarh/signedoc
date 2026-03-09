@@ -2,6 +2,8 @@
  * Email sending: Resend (HTTP API, recommended on Vercel) or Nodemailer (SMTP).
  * Set RESEND_API_KEY or SMTP_* in .env. On Vercel, Resend avoids "Unexpected socket close" with SMTP.
  */
+import nodemailer from "nodemailer";
+
 const BASE_URL = (process.env.BASE_URL || process.env.APP_URL || "http://localhost:3000").replace(/\/$/, "");
 const MAIL_FROM = process.env.MAIL_FROM || process.env.RESEND_FROM || '"SignFlow" <noreply@localhost>';
 
