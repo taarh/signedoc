@@ -6,7 +6,7 @@ if (!process.env.VERCEL) {
 import express from "express";
 import { createServer } from "http";
 import { Server } from "socket.io";
-import { MongoClient } from "mongodb";
+import { MongoClient, ObjectId, GridFSBucket } from "mongodb";
 import multer from "multer";
 import { v4 as uuidv4 } from "uuid";
 import path from "path";
@@ -36,6 +36,20 @@ const MONGO_URI = getMongoUri();
 const PORT = Number(process.env.PORT) || 3000;
 
 let db: import("mongodb").Db;
+const GRIDFS_BUCKET = "documents";
+
+function getGridFSBucket() {
+  return new GridFSBucket(db, { bucketName: GRIDFS_BUCKET });
+}
+
+function streamToBuffer(stream: NodeJS.ReadableStream): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  return new Promise((resolve, reject) => {
+    stream.on("data", (chunk: Buffer) => chunks.push(chunk));
+    stream.on("end", () => resolve(Buffer.concat(chunks)));
+    stream.on("error", reject);
+  });
+}
 
 let dbReady: Promise<void> | null = null;
 function ensureDb() {
@@ -121,18 +135,26 @@ app.post("/api/documents/upload", upload.single("file"), async (req, res) => {
     const id = uuidv4();
     const name = req.file.originalname;
     const file_path = req.file.path;
-    const docPayload: { id: string; name: string; file_path: string; status: string; created_at: Date; blob_url?: string } = {
+    const buf = fs.readFileSync(file_path);
+    const docPayload: {
+      id: string;
+      name: string;
+      file_path: string;
+      status: string;
+      created_at: Date;
+      blob_url?: string;
+      gridfs_file_id?: string;
+    } = {
       id,
       name,
       file_path,
       status: "draft",
       created_at: new Date(),
     };
-    // If a Blob token is configured (on Vercel), upload the PDF to Blob storage
+    // Option 1: Vercel Blob (if token is set)
     if (BLOB_TOKEN) {
       try {
         console.log("[Blob] Uploading original PDF to Blob for document", id);
-        const buf = fs.readFileSync(file_path);
         const blob = await blobPut(`documents/${id}/${name}`, buf, {
           access: "public",
           contentType: "application/pdf",
@@ -142,6 +164,21 @@ app.post("/api/documents/upload", upload.single("file"), async (req, res) => {
       } catch (e) {
         console.error("[Blob] Upload failed:", e);
       }
+    }
+    // Option 2: MongoDB GridFS (always on Vercel as fallback, or when no Blob)
+    if (isVercel || !docPayload.blob_url) {
+      const bucket = getGridFSBucket();
+      const oid = new ObjectId();
+      const uploadStream = bucket.openUploadStreamWithId(oid, name, {
+        contentType: "application/pdf",
+        metadata: { documentId: id },
+      });
+      await new Promise<void>((resolve, reject) => {
+        uploadStream.end(buf);
+        uploadStream.on("finish", () => resolve());
+        uploadStream.on("error", reject);
+      });
+      docPayload.gridfs_file_id = oid.toString();
     }
     await db.collection("documents").insertOne(docPayload);
     await addAudit(id, "uploaded", `Document "${name}" uploaded`, undefined, name);
@@ -180,13 +217,27 @@ app.get("/api/documents/:id", async (req, res) => {
   }
 });
 
-// Serve PDF file by document id (local file_path or redirect to Blob on Vercel)
+// Serve PDF file by document id (Blob redirect, GridFS stream, or local file_path)
 app.get("/api/documents/:id/file", async (req, res) => {
   try {
-    const doc = await db.collection("documents").findOne({ id: req.params.id }, { projection: { file_path: 1, blob_url: 1, name: 1 } });
+    const doc = await db.collection("documents").findOne(
+      { id: req.params.id },
+      { projection: { file_path: 1, blob_url: 1, gridfs_file_id: 1, name: 1 } }
+    );
     if (!doc) return res.status(404).json({ error: "Document file not found" });
     if (doc.blob_url) {
       return res.redirect(302, doc.blob_url);
+    }
+    if (doc.gridfs_file_id) {
+      const bucket = getGridFSBucket();
+      const downloadStream = bucket.openDownloadStream(new ObjectId(doc.gridfs_file_id));
+      res.setHeader("Content-Type", "application/pdf");
+      downloadStream.pipe(res);
+      downloadStream.on("error", (e) => {
+        console.error("[GridFS] Download error:", e);
+        if (!res.headersSent) res.status(500).json({ error: "File read failed" });
+      });
+      return;
     }
     if (!doc.file_path) return res.status(404).json({ error: "Document file not found" });
     const filePath = path.isAbsolute(doc.file_path) ? doc.file_path : path.join(process.cwd(), doc.file_path);
@@ -298,10 +349,25 @@ app.get("/api/activity", async (req, res) => {
 
 app.get("/api/documents/:id/signed-pdf", async (req, res) => {
   try {
-    const doc = await db.collection("documents").findOne({ id: req.params.id }, { projection: { signed_file_path: 1, signed_blob_url: 1, name: 1 } });
+    const doc = await db.collection("documents").findOne(
+      { id: req.params.id },
+      { projection: { signed_file_path: 1, signed_blob_url: 1, signed_gridfs_file_id: 1, name: 1 } }
+    );
     if (!doc) return res.status(404).json({ error: "Signed PDF not ready" });
     if (doc.signed_blob_url) {
       return res.redirect(302, doc.signed_blob_url);
+    }
+    if (doc.signed_gridfs_file_id) {
+      const bucket = getGridFSBucket();
+      const downloadStream = bucket.openDownloadStream(new ObjectId(doc.signed_gridfs_file_id));
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `attachment; filename="${(doc.name || "signed").replace(/\.pdf$/i, "")}-signed.pdf"`);
+      downloadStream.pipe(res);
+      downloadStream.on("error", (e) => {
+        console.error("[GridFS] Signed PDF download error:", e);
+        if (!res.headersSent) res.status(500).json({ error: "Download failed" });
+      });
+      return;
     }
     if (!doc.signed_file_path) return res.status(404).json({ error: "Signed PDF not ready" });
     const filePath = path.isAbsolute(doc.signed_file_path) ? doc.signed_file_path : path.join(process.cwd(), doc.signed_file_path);
@@ -373,6 +439,13 @@ app.post("/api/sign/:token", async (req, res) => {
           sourcePath = path.join(tmpDir, `source-${signer.document_id}.pdf`);
           signedPath = path.join(tmpDir, `signed-${signer.document_id}.pdf`);
           fs.writeFileSync(sourcePath, buf);
+        } else if (doc.gridfs_file_id) {
+          const bucket = getGridFSBucket();
+          const stream = bucket.openDownloadStream(new ObjectId(doc.gridfs_file_id));
+          const buf = await streamToBuffer(stream);
+          sourcePath = path.join(tmpDir, `source-${signer.document_id}.pdf`);
+          signedPath = path.join(tmpDir, `signed-${signer.document_id}.pdf`);
+          fs.writeFileSync(sourcePath, buf);
         } else {
           sourcePath = path.isAbsolute(doc.file_path) ? doc.file_path : path.join(process.cwd(), doc.file_path);
           signedPath = path.join(path.dirname(sourcePath), `signed-${signer.document_id}.pdf`);
@@ -388,6 +461,23 @@ app.post("/api/sign/:token", async (req, res) => {
           await db.collection("documents").updateOne(
             { id: signer.document_id },
             { $set: { signed_blob_url: blob.url } }
+          );
+        } else if (isVercel || doc.gridfs_file_id) {
+          const signedBuf = fs.readFileSync(signedPath);
+          const bucket = getGridFSBucket();
+          const oid = new ObjectId();
+          const uploadStream = bucket.openUploadStreamWithId(oid, `signed-${signer.document_id}.pdf`, {
+            contentType: "application/pdf",
+            metadata: { documentId: signer.document_id, signed: true },
+          });
+          await new Promise<void>((resolve, reject) => {
+            uploadStream.end(signedBuf);
+            uploadStream.on("finish", () => resolve());
+            uploadStream.on("error", reject);
+          });
+          await db.collection("documents").updateOne(
+            { id: signer.document_id },
+            { $set: { signed_gridfs_file_id: oid.toString() } }
           );
         } else {
           await db.collection("documents").updateOne(
