@@ -42,6 +42,11 @@ function getGridFSBucket() {
   return new GridFSBucket(db, { bucketName: GRIDFS_BUCKET });
 }
 
+const GRIDFS_ATTACHMENTS_BUCKET = "attachments";
+function getAttachmentsBucket() {
+  return new GridFSBucket(db, { bucketName: GRIDFS_ATTACHMENTS_BUCKET });
+}
+
 function streamToBuffer(stream: NodeJS.ReadableStream): Promise<Buffer> {
   const chunks: Buffer[] = [];
   return new Promise((resolve, reject) => {
@@ -78,6 +83,8 @@ async function connectDb() {
   await db.collection("fields").createIndex({ document_id: 1 });
   await db.collection("audit_trail").createIndex({ timestamp: -1 });
   await db.collection("audit_trail").createIndex({ document_id: 1 });
+  await db.collection("attachments").createIndex({ document_id: 1, signer_id: 1 });
+  await db.collection("attachments").createIndex({ request_id: 1 });
   console.log("MongoDB connected");
 }
 
@@ -279,7 +286,7 @@ app.post("/api/documents/:id/signers", async (req, res) => {
 
 app.post("/api/documents/:id/fields", async (req, res) => {
   try {
-    const { fields } = req.body;
+    const { fields, requested_attachments } = req.body;
     const docId = req.params.id;
     await db.collection("fields").deleteMany({ document_id: docId });
     for (const f of fields) {
@@ -295,6 +302,12 @@ app.post("/api/documents/:id/fields", async (req, res) => {
         height: f.height,
         value: null,
       });
+    }
+    if (Array.isArray(requested_attachments)) {
+      await db.collection("documents").updateOne(
+        { id: docId },
+        { $set: { requested_attachments: requested_attachments.map((r: { id: string; label: string }) => ({ id: r.id, label: r.label || "" })) } }
+      );
     }
     res.json({ success: true });
   } catch (e) {
@@ -390,10 +403,57 @@ app.get("/api/sign/:token", async (req, res) => {
       .find({ document_id: signer.document_id, signer_id: signer.id })
       .project({ _id: 0 })
       .toArray();
-    res.json({ signer, doc, fields });
+    const uploaded_attachments = await db
+      .collection("attachments")
+      .find({ document_id: signer.document_id, signer_id: signer.id })
+      .project({ _id: 0 })
+      .toArray();
+    res.json({ signer, doc, fields, uploaded_attachments });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Failed to load signing session" });
+  }
+});
+
+app.post("/api/sign/:token/attachment", upload.single("file"), async (req, res) => {
+  try {
+    const signer = await db.collection("signers").findOne({ access_token: req.params.token }, { projection: { _id: 0 } });
+    if (!signer) return res.status(404).json({ error: "Invalid token" });
+    const doc = await db.collection("documents").findOne({ id: signer.document_id }, { projection: { requested_attachments: 1 } });
+    if (!doc) return res.status(404).json({ error: "Document not found" });
+    const request_id = req.body?.request_id;
+    const requested = Array.isArray(doc.requested_attachments) ? doc.requested_attachments.find((r: { id: string }) => r.id === request_id) : null;
+    if (!request_id || !requested) return res.status(400).json({ error: "Invalid request_id" });
+    if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+
+    const buf = fs.readFileSync(req.file.path);
+    const bucket = getAttachmentsBucket();
+    const oid = new ObjectId();
+    const uploadStream = bucket.openUploadStreamWithId(oid, req.file.originalname, {
+      metadata: { document_id: signer.document_id, signer_id: signer.id, request_id },
+    });
+    await new Promise<void>((resolve, reject) => {
+      uploadStream.end(buf);
+      uploadStream.on("finish", () => resolve());
+      uploadStream.on("error", reject);
+    });
+    try { fs.unlinkSync(req.file.path); } catch (_) {}
+
+    const id = uuidv4();
+    await db.collection("attachments").insertOne({
+      id,
+      document_id: signer.document_id,
+      signer_id: signer.id,
+      request_id,
+      label: requested.label || "",
+      file_name: req.file.originalname,
+      gridfs_file_id: oid.toString(),
+      uploaded_at: new Date(),
+    });
+    res.json({ id, request_id, file_name: req.file.originalname });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Upload failed" });
   }
 });
 

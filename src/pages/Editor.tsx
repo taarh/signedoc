@@ -12,7 +12,7 @@ import { CSS } from "@dnd-kit/utilities";
 import {
   Plus, Users, FileText, Send, ChevronLeft, X,
   Type, Calendar, PenTool, Trash2, AlertCircle,
-  MousePointer2, Hand, ZoomIn, ZoomOut, Download, Share2
+  MousePointer2, Hand, ZoomIn, ZoomOut, Download, Share2, CheckSquare, Paperclip
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { Viewer, Worker } from "@react-pdf-viewer/core";
@@ -31,7 +31,7 @@ interface Signer {
 interface Field {
   id?: string;
   signer_id: string;
-  type: 'signature' | 'initial' | 'date' | 'text';
+  type: 'signature' | 'initial' | 'date' | 'text' | 'checkbox';
   x: number;
   y: number;
   page: number;
@@ -92,6 +92,7 @@ export function Editor() {
   const [document, setDocument] = useState<any>(null);
   const [signers, setSigners] = useState<Signer[]>([]);
   const [fields, setFields] = useState<Field[]>([]);
+  const [requestedAttachments, setRequestedAttachments] = useState<{ id: string; label: string }[]>([]);
   const [selectedSignerId, setSelectedSignerId] = useState<string>("");
   const [isAddingSigner, setIsAddingSigner] = useState(false);
   const [newSigner, setNewSigner] = useState({ name: "", email: "" });
@@ -130,6 +131,7 @@ export function Editor() {
       setDocument(data);
       setSigners(data.signers || []);
       setFields(data.fields || []);
+      setRequestedAttachments(data.requested_attachments || []);
       if (data.signers?.length > 0) {
         setSelectedSignerId(data.signers[0].id);
       }
@@ -174,8 +176,8 @@ export function Editor() {
       x: 100,
       y: 100,
       page: 1,
-      width: type === 'signature' ? 180 : 120,
-      height: type === 'signature' ? 60 : 40,
+      width: type === 'signature' ? 180 : type === 'checkbox' ? 24 : 120,
+      height: type === 'signature' ? 60 : type === 'checkbox' ? 24 : 40,
     };
 
     setFields([...fields, newField]);
@@ -206,7 +208,7 @@ export function Editor() {
       await fetch(`/api/documents/${id}/fields`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fields }),
+        body: JSON.stringify({ fields, requested_attachments: requestedAttachments }),
       });
 
       await fetch(`/api/documents/${id}/send`, {
@@ -278,6 +280,7 @@ export function Editor() {
           { type: 'initial', icon: Type, label: 'Initials' },
           { type: 'date', icon: Calendar, label: 'Date' },
           { type: 'text', icon: Type, label: 'Text' },
+          { type: 'checkbox', icon: CheckSquare, label: 'Checkbox' },
         ].map((tool) => (
           <button
             key={tool.type}
@@ -344,6 +347,36 @@ export function Editor() {
               <p className="text-[10px] font-medium leading-relaxed">
                 Assign fields to each signer by selecting them from the list above first.
               </p>
+            </div>
+            <div className="pt-4 border-t border-slate-200">
+              <h3 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-3">Pièces jointes requises</h3>
+              <p className="text-[10px] text-slate-500 mb-3">Documents à fournir par le signataire (ex. carte d&apos;identité)</p>
+              {requestedAttachments.map((item) => (
+                <div key={item.id} className="flex items-center gap-2 mb-2">
+                  <input
+                    type="text"
+                    value={item.label}
+                    onChange={(e) => setRequestedAttachments((prev) => prev.map((p) => p.id === item.id ? { ...p, label: e.target.value } : p)))}
+                    placeholder="Ex. Carte d'identité"
+                    className="flex-1 px-3 py-2 text-xs border border-slate-200 rounded-lg focus:ring-2 focus:ring-slate-900/10 focus:border-slate-900 outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setRequestedAttachments((prev) => prev.filter((p) => p.id !== item.id))}
+                    className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              ))}
+              <button
+                type="button"
+                onClick={() => setRequestedAttachments((prev) => [...prev, { id: crypto.randomUUID(), label: "" }])}
+                className="flex items-center gap-2 mt-2 text-xs font-bold text-slate-600 hover:text-slate-900"
+              >
+                <Paperclip className="w-3.5 h-3.5" />
+                Ajouter une pièce jointe
+              </button>
             </div>
           </div>
         </aside>

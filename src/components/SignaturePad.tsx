@@ -5,15 +5,17 @@ import { X, RotateCcw, Check, PenTool, Type } from "lucide-react";
 interface SignaturePadProps {
   onSave: (dataUrl: string) => void;
   onCancel: () => void;
+  /** "initial" = initials only (type tab preferred); "signature" = full signature */
+  variant?: "signature" | "initial";
 }
 
 const CANVAS_WIDTH = 500;
 const CANVAS_HEIGHT = 200;
 
-export function SignaturePad({ onSave, onCancel }: SignaturePadProps) {
+export function SignaturePad({ onSave, onCancel, variant = "signature" }: SignaturePadProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const padRef = useRef<SignaturePadLib | null>(null);
-  const [activeTab, setActiveTab] = useState<'draw' | 'type'>('draw');
+  const [activeTab, setActiveTab] = useState<'draw' | 'type'>(variant === "initial" ? "type" : "draw");
   const [typedName, setTypedName] = useState("");
 
   // Initialize signature_pad when canvas is mounted (draw tab). Delay so modal/canvas is ready.
@@ -76,7 +78,9 @@ export function SignaturePad({ onSave, onCancel }: SignaturePadProps) {
     <div className="bg-white rounded-[40px] shadow-2xl overflow-hidden border border-slate-100">
       <div className="p-8 border-b border-slate-50 flex items-center justify-between">
         <div className="flex items-center gap-6">
-          <h2 className="text-2xl font-serif font-bold text-slate-900">Create Signature</h2>
+          <h2 className="text-2xl font-serif font-bold text-slate-900">
+            {variant === "initial" ? "Create Initials" : "Create Signature"}
+          </h2>
           <div className="flex bg-slate-50 p-1 rounded-full">
             <button 
               onClick={() => setActiveTab('draw')}
@@ -106,7 +110,11 @@ export function SignaturePad({ onSave, onCancel }: SignaturePadProps) {
       <div className="p-10">
         {activeTab === 'draw' ? (
           <div className="relative group max-w-[500px]">
-            <p className="text-sm text-slate-500 mb-3">Dessinez votre signature dans la zone ci-dessous (souris ou doigt)</p>
+            <p className="text-sm text-slate-500 mb-3">
+              {variant === "initial"
+                ? "Saisissez vos initiales ou dessinez-les dans la zone ci-dessous."
+                : "Dessinez votre signature dans la zone ci-dessous (souris ou doigt)"}
+            </p>
             <div className="relative" style={{ touchAction: 'none', pointerEvents: 'auto' }}>
               <canvas
                 ref={canvasRef}
@@ -135,13 +143,13 @@ export function SignaturePad({ onSave, onCancel }: SignaturePadProps) {
                 type="text" 
                 value={typedName}
                 onChange={(e) => setTypedName(e.target.value)}
-                placeholder="Type your full name..."
+                placeholder={variant === "initial" ? "Ex. JD" : "Type your full name..."}
                 className="w-full px-8 py-5 bg-slate-50 border border-slate-100 rounded-[32px] focus:ring-4 focus:ring-slate-900/5 focus:border-slate-900 outline-none text-lg transition-all placeholder:text-slate-300"
               />
             </div>
             <div className="h-[120px] bg-slate-50 rounded-[32px] flex items-center justify-center border border-slate-100">
               <p className="text-5xl font-serif italic text-slate-900 opacity-80">
-                {typedName || "Your Signature"}
+                {typedName || (variant === "initial" ? "Initials" : "Your Signature")}
               </p>
             </div>
           </div>
@@ -166,7 +174,7 @@ export function SignaturePad({ onSave, onCancel }: SignaturePadProps) {
           onClick={handleSave}
           className="px-10 py-4 bg-slate-900 text-white font-bold rounded-full hover:bg-slate-800 transition-all shadow-xl shadow-slate-900/10 active:scale-95"
         >
-          Adopt & Sign
+          {variant === "initial" ? "Adopt & Initials" : "Adopt & Sign"}
         </button>
       </div>
     </div>

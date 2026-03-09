@@ -65,6 +65,34 @@ export async function generateSignedPdf(
         size: Math.min(10, h * 0.4),
         color: { type: "RGB", red: 0.06, green: 0.07, blue: 0.16 },
       });
+    } else if (field.type === "checkbox") {
+      const checked = field.value === "true" || field.value === "checked" || field.value === "1";
+      const boxSize = Math.min(w, h) * 0.8;
+      const cx = x + w / 2;
+      const cy = y + h / 2;
+      page.drawRectangle({
+        x: cx - boxSize / 2,
+        y: cy - boxSize / 2,
+        width: boxSize,
+        height: boxSize,
+        borderColor: { type: "RGB", red: 0.06, green: 0.07, blue: 0.16 },
+        borderWidth: 1.5,
+      });
+      if (checked) {
+        const s = boxSize * 0.25;
+        page.drawLine({
+          start: { x: cx - boxSize / 2 + s, y: cy },
+          end: { x: cx - s * 0.3, y: cy - boxSize / 2 + s * 1.5 },
+          thickness: 2,
+          color: { type: "RGB", red: 0.06, green: 0.07, blue: 0.16 },
+        });
+        page.drawLine({
+          start: { x: cx - s * 0.3, y: cy - boxSize / 2 + s * 1.5 },
+          end: { x: cx + boxSize / 2 - s * 0.2, y: cy - boxSize / 2 + s * 0.3 },
+          thickness: 2,
+          color: { type: "RGB", red: 0.06, green: 0.07, blue: 0.16 },
+        });
+      }
     }
   }
 

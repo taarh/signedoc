@@ -5,7 +5,7 @@ import { defaultLayoutPlugin } from "@react-pdf-viewer/default-layout";
 import { SignaturePad } from "../components/SignaturePad";
 import {
   CheckCircle, FileText, ShieldCheck, PenTool, Lock, Info,
-  ChevronDown, Download, Printer, Users, Calendar
+  ChevronDown, Download, Printer, Users, Calendar, Type, CheckSquare, Square, Paperclip, Upload
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import toast from "react-hot-toast";
@@ -17,9 +17,12 @@ export function Sign() {
   const [data, setData] = useState<any>(null);
   const [isSigning, setIsSigning] = useState(false);
   const [activeFieldId, setActiveFieldId] = useState<string | null>(null);
+  const [activeTextFieldId, setActiveTextFieldId] = useState<string | null>(null);
+  const [textInputValue, setTextInputValue] = useState("");
   const [signatures, setSignatures] = useState<Record<string, string>>({});
   const [isCompleted, setIsCompleted] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [uploadingRequestId, setUploadingRequestId] = useState<string | null>(null);
 
   const defaultLayoutPluginInstance = defaultLayoutPlugin();
 
@@ -39,11 +42,23 @@ export function Sign() {
   };
 
   const handleFieldClick = (fieldId: string, fieldType?: string) => {
+    if (fieldType === "checkbox") {
+      setSignatures((prev) => ({
+        ...prev,
+        [fieldId]: prev[fieldId] === "true" ? "" : "true",
+      }));
+      return;
+    }
     if (fieldType === "date") {
       setSignatures((prev) => ({
         ...prev,
         [fieldId]: dayjs().format("DD/MM/YYYY"),
       }));
+      return;
+    }
+    if (fieldType === "text") {
+      setActiveTextFieldId(fieldId);
+      setTextInputValue(signatures[fieldId] ?? "");
       return;
     }
     setActiveFieldId(fieldId);
@@ -56,6 +71,28 @@ export function Sign() {
     }
     setIsSigning(false);
     setActiveFieldId(null);
+  };
+
+  const handleAttachmentUpload = async (requestId: string, files: FileList | null) => {
+    if (!files?.length || !token) return;
+    setUploadingRequestId(requestId);
+    try {
+      for (let i = 0; i < files.length; i++) {
+        const form = new FormData();
+        form.append("request_id", requestId);
+        form.append("file", files[i]);
+        const res = await fetch(`/api/sign/${token}/attachment`, { method: "POST", body: form });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          toast.error(err.error || "Échec de l'envoi du fichier");
+          break;
+        }
+      }
+      await fetchSignData();
+      if (files.length > 0) toast.success("Fichier(s) envoyé(s)");
+    } finally {
+      setUploadingRequestId(null);
+    }
   };
 
   const handleSubmit = async () => {
@@ -215,6 +252,8 @@ export function Sign() {
                     <span className="text-xs font-semibold text-slate-900 px-2 truncate max-w-full">
                       {signatures[field.id]}
                     </span>
+                  ) : field.type === "checkbox" ? (
+                    <CheckSquare className="w-full h-full text-emerald-600 p-0.5" strokeWidth={2} />
                   ) : (
                     <img src={signatures[field.id]} alt="Signature" className="max-h-[80%] max-w-[80%] object-contain" />
                   )
@@ -224,6 +263,18 @@ export function Sign() {
                       <>
                         <Calendar className="w-5 h-5 text-slate-900" />
                         <span className="text-[10px] font-black text-slate-900 uppercase tracking-widest">Date</span>
+                      </>
+                    ) : field.type === "text" ? (
+                      <>
+                        <Type className="w-5 h-5 text-slate-900" />
+                        <span className="text-[10px] font-black text-slate-900 uppercase tracking-widest">Enter text</span>
+                      </>
+                    ) : field.type === "checkbox" ? (
+                      <Square className="w-5 h-5 text-slate-400" strokeWidth={2} />
+                    ) : field.type === "initial" ? (
+                      <>
+                        <PenTool className="w-5 h-5 text-slate-900" />
+                        <span className="text-[10px] font-black text-slate-900 uppercase tracking-widest">Initials</span>
                       </>
                     ) : (
                       <>
@@ -271,6 +322,56 @@ export function Sign() {
               </div>
             </div>
           </div>
+
+          {/* Pièces jointes à fournir */}
+          {Array.isArray(data.doc?.requested_attachments) && data.doc.requested_attachments.length > 0 && (
+            <div className="bg-white rounded-3xl border border-slate-100 shadow-sm p-6">
+              <div className="flex items-center gap-3 mb-4">
+                <div className="w-9 h-9 rounded-2xl bg-slate-900 flex items-center justify-center">
+                  <Paperclip className="w-4 h-4 text-white" />
+                </div>
+                <div>
+                  <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">Pièces jointes</p>
+                  <p className="text-sm font-semibold text-slate-900">Fichiers à joindre</p>
+                </div>
+              </div>
+              <div className="space-y-4">
+                {data.doc.requested_attachments.map((req: { id: string; label: string }) => (
+                  <div key={req.id} className="space-y-2">
+                    <label className="text-xs font-semibold text-slate-700 block">{req.label}</label>
+                    <input
+                      type="file"
+                      multiple
+                      className="hidden"
+                      id={`attach-${req.id}`}
+                      onChange={(e) => {
+                        handleAttachmentUpload(req.id, e.target.files);
+                        e.target.value = "";
+                      }}
+                      disabled={!!uploadingRequestId}
+                    />
+                    <label
+                      htmlFor={`attach-${req.id}`}
+                      className={`inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-slate-200 text-xs font-bold cursor-pointer transition-colors ${
+                        uploadingRequestId === req.id ? "opacity-60 pointer-events-none" : "hover:bg-slate-50"
+                      }`}
+                    >
+                      <Upload className="w-4 h-4" />
+                      {uploadingRequestId === req.id ? "Envoi…" : "Ajouter un ou plusieurs fichiers"}
+                    </label>
+                    {(data.uploaded_attachments || [])
+                      .filter((a: { request_id: string }) => a.request_id === req.id)
+                      .map((a: { id: string; file_name: string }) => (
+                        <div key={a.id} className="flex items-center gap-2 text-xs text-slate-600">
+                          <FileText className="w-3.5 h-3.5 shrink-0" />
+                          <span className="truncate">{a.file_name}</span>
+                        </div>
+                      ))}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Questions to signer */}
           <div className="bg-white rounded-3xl border border-slate-100 shadow-sm p-6 space-y-4">
@@ -347,9 +448,71 @@ export function Sign() {
             >
               <SignaturePad
                 key={activeFieldId ?? 'pad'}
+                variant={data.fields.find((f: any) => f.id === activeFieldId)?.type === "initial" ? "initial" : "signature"}
                 onSave={handleSaveSignature}
-                onCancel={() => setIsSigning(false)}
+                onCancel={() => { setIsSigning(false); setActiveFieldId(null); }}
               />
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Text field modal - for "text" type only */}
+      <AnimatePresence>
+        {activeTextFieldId && (
+          <div
+            className="fixed inset-0 z-[100] flex items-center justify-center p-4"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setActiveTextFieldId(null);
+            }}
+          >
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="absolute inset-0 bg-slate-900/80 backdrop-blur-xl"
+              aria-hidden
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.9 }}
+              onClick={(e) => e.stopPropagation()}
+              className="relative z-10 w-full max-w-md bg-white rounded-[24px] shadow-2xl p-8"
+              role="dialog"
+              aria-modal
+            >
+              <h2 className="text-xl font-serif font-bold text-slate-900 mb-4">Enter text</h2>
+              <input
+                type="text"
+                value={textInputValue}
+                onChange={(e) => setTextInputValue(e.target.value)}
+                placeholder="Type here..."
+                className="w-full px-5 py-4 bg-slate-50 border border-slate-200 rounded-2xl focus:ring-2 focus:ring-slate-900/10 focus:border-slate-900 outline-none text-slate-900"
+                autoFocus
+              />
+              <div className="mt-6 flex justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={() => { setActiveTextFieldId(null); setTextInputValue(""); }}
+                  className="px-5 py-3 text-sm font-bold text-slate-400 hover:text-slate-900"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (activeTextFieldId) {
+                      setSignatures((prev) => ({ ...prev, [activeTextFieldId]: textInputValue.trim() }));
+                      setActiveTextFieldId(null);
+                      setTextInputValue("");
+                    }
+                  }}
+                  className="px-6 py-3 bg-slate-900 text-white font-bold rounded-full hover:bg-slate-800 text-sm"
+                >
+                  Save
+                </button>
+              </div>
             </motion.div>
           </div>
         )}
